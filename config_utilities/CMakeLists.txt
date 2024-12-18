@@ -10,7 +10,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(OptionalPackage)
 
 option(BUILD_SHARED_LIBS "Build shared libs" ON)
-option(CONFIG_UTILS_ENABLE_ROS "Export roscpp and build related code" ON)
+option(CONFIG_UTILS_ENABLE_ROS "Export roscpp and build related code" OFF)
 option(CONFIG_UTILS_ENABLE_ROS2 "Export rclcpp and build related code" ON)
 option(CONFIG_UTILS_ENABLE_EIGEN "Export Eigen and build related code" ON)
 option(CONFIG_UTILS_ENABLE_GLOG "Export glog and build related code" ON)

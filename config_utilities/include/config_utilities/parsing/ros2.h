@@ -54,27 +54,46 @@ namespace internal {
 
 // Translate the parameter server to yaml code. This is inlined to shift the dependency on ROS to the downstream cpp
 // file.
-inline YAML::Node xmlRpcToYaml(const XmlRpc::XmlRpcValue& xml) {
-  switch (xml.getType()) {
-    case XmlRpc::XmlRpcValue::Type::TypeBoolean:
-      return YAML::Node(static_cast<bool>(xml));
-    case XmlRpc::XmlRpcValue::Type::TypeInt:
-      return YAML::Node(static_cast<int>(xml));
-    case XmlRpc::XmlRpcValue::Type::TypeDouble:
-      return YAML::Node(static_cast<double>(xml));
-    case XmlRpc::XmlRpcValue::Type::TypeString:
-      return YAML::Node(static_cast<std::string>(xml));
-    case XmlRpc::XmlRpcValue::Type::TypeArray: {
+inline YAML::Node rosParamToYaml(const rclcpp::Parameter& param) {
+  // NOTE(Oliver): Seems like there should be a clearer way to do this.
+  switch (param.get_type()) {
+    case rclcpp::ParameterType::PARAMETER_BOOL:
+      return YAML::Node(param.as_bool());
+    case rclcpp::ParameterType::PARAMETER_INTEGER:
+      return YAML::Node(param.as_int());
+    case rclcpp::ParameterType::PARAMETER_DOUBLE:
+      return YAML::Node(param.as_double());
+    case rclcpp::ParameterType::PARAMETER_STRING:
+      return YAML::Node(param.as_string());
+    case rclcpp::ParameterType::PARAMETER_BOOL_ARRAY: {
       YAML::Node node(YAML::NodeType::Sequence);
-      for (int i = 0; i < xml.size(); ++i) {
-        node.push_back(xmlRpcToYaml(xml[i]));
+      auto values = param.as_bool_array();
+      for (bool v : values) {
+        node.push_back(YAML::Node(v));
       }
       return node;
     }
-    case XmlRpc::XmlRpcValue::Type::TypeStruct: {
-      YAML::Node node(YAML::NodeType::Map);
-      for (auto it = xml.begin(); it != xml.end(); ++it) {
-        node[it->first] = xmlRpcToYaml(it->second);
+    case rclcpp::ParameterType::PARAMETER_INTEGER_ARRAY: {
+      YAML::Node node(YAML::NodeType::Sequence);
+      auto values = param.as_integer_array();
+      for (int v : values) {
+        node.push_back(YAML::Node(v));
+      }
+      return node;
+    }
+    case rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY: {
+      YAML::Node node(YAML::NodeType::Sequence);
+      auto values = param.as_double_array();
+      for (double v : values) {
+        node.push_back(YAML::Node(v));
+      }
+      return node;
+    }
+    case rclcpp::ParameterType::PARAMETER_STRING_ARRAY: {
+      YAML::Node node(YAML::NodeType::Sequence);
+      auto values = param.as_string_array();
+      for (std::string v : values) {
+        node.push_back(YAML::Node(v));
       }
       return node;
     }
@@ -83,37 +102,35 @@ inline YAML::Node xmlRpcToYaml(const XmlRpc::XmlRpcValue& xml) {
   }
 }
 
-inline YAML::Node rosToYaml(const rclcpp::Node& node) {
+inline YAML::Node rosToYaml(const rclcpp::Node::SharedPtr node, 
+        const std::string& name_space = "") {
   YAML::Node root;
-
-  auto all_params = node.list_parameters({}, rcl_interfaces::srv::ListParameters::Request::DEPTH_RECURSIVE);
+  // Retrieve all parameters, with a namespace filter if specified
+  auto filter = !name_space.empty() ? std::vector<std::string>{name_space} 
+                      : std::vector<std::string>{};
+  auto all_params = node->list_parameters(filter, rcl_interfaces::srv::ListParameters::Request::DEPTH_RECURSIVE);
 
   for (std::string& name : all_params.names) {
-    // TODO(nathan) optional namespace filter
-
-    name = name.erase(0, nh.getNamespace().length());  // Remove the nodehandle's namespace.
-    std::vector<std::string> name_parts = splitNamespace(name);
+    std::vector<std::string> name_parts = splitNamespace(name, ".");
     std::string local_name = "";
     if (!name_parts.empty()) {
-      name = name.substr(1);  // Remove the leading slash.
       local_name = name_parts.back();
       name_parts.pop_back();
     }
 
-    const auto sub_namespace = joinNamespace(name_parts);
+    const auto sub_namespace = joinNamespace(name_parts, ".");
 
-    // Get the Xml Value
-    XmlRpc::XmlRpcValue value;
-    nh.getParam(name, value);
-
+    // Get the parameter's value
+    rclcpp::Parameter param;
+    node->get_parameter(name, param);
     // Convert data to yaml.
     YAML::Node local_node;
     if (local_name.empty()) {
-      local_node = xmlRpcToYaml(value);
+      local_node = rosParamToYaml(param);
     } else {
-      local_node[local_name] = xmlRpcToYaml(value);
+      local_node[local_name] = rosParamToYaml(param);
     }
-    moveDownNamespace(local_node, sub_namespace);
+    moveDownNamespace(local_node, sub_namespace, ".");
     mergeYamlNodes(root, local_node);
   }
 
@@ -123,19 +140,19 @@ inline YAML::Node rosToYaml(const rclcpp::Node& node) {
 }  // namespace internal
 
 /**
- * @brief Loads a config from a yaml node.
+ * @brief Loads a config from a ROS2 node.
  *
  * @tparam ConfigT The config type. This can also be a VirtualConfig<BaseT> or a std::vector<ConfigT>.
- * @param nh The ROS nodehandle to create the config from.
- * @param name_space Optionally specify a name space to create the config from. Separate names with slashes '/'.
- * Example: "my_config/my_sub_config".
+ * @param node The ROS2 node to create the config from.
+ * @param name_space Optionally specify a name space to create the config from. Separate names with dots '.'.
+ * Example: "my_config.my_sub_config".
  * @returns The config.
  */
 template <typename ConfigT>
-ConfigT fromRos(const ros::NodeHandle& nh, const std::string& name_space = "") {
-  const ros::NodeHandle ns_nh = ros::NodeHandle(nh, name_space);
-  const YAML::Node node = internal::rosToYaml(ns_nh);
-  return internal::fromYamlImpl(node, "", static_cast<ConfigT*>(nullptr));
+ConfigT fromRos(const rclcpp::Node::SharedPtr node, const std::string& name_space = "") {
+  const YAML::Node yaml_node = internal::rosToYaml(node, name_space, map_prefixes);
+    
+  return fromYaml<ConfigT>(yaml_node, name_space);
 }
 
 }  // namespace config
