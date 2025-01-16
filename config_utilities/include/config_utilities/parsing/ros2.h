@@ -39,10 +39,12 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 #include <rclcpp/rclcpp.hpp>
 
 #include "config_utilities/factory.h"
+#include "config_utilities/update.h"
 #include "config_utilities/internal/string_utils.h"
 #include "config_utilities/internal/visitor.h"
 #include "config_utilities/internal/yaml_utils.h"
@@ -102,27 +104,33 @@ inline YAML::Node rosParamToYaml(const rclcpp::Parameter& param) {
   }
 }
 
-inline YAML::Node rosToYaml(const rclcpp::Node::SharedPtr node, 
+inline YAML::Node rosToYaml(rclcpp::node_interfaces::NodeParametersInterface::SharedPtr interface, 
         const std::string& name_space = "") {
   YAML::Node root;
+  // ROS2 uses dots rather than slashes for parameter 'sub-namespaces' within nodes.
+  std::string ros_ns = name_space;
+  std::replace(ros_ns.begin(), ros_ns.end(), '/', '.');
   // Retrieve all parameters, with a namespace filter if specified
-  auto filter = !name_space.empty() ? std::vector<std::string>{name_space} 
+  auto filter = !ros_ns.empty() ? std::vector<std::string>{ros_ns} 
                       : std::vector<std::string>{};
-  auto all_params = node->list_parameters(filter, rcl_interfaces::srv::ListParameters::Request::DEPTH_RECURSIVE);
+  auto all_params = interface->list_parameters(filter, 
+          rcl_interfaces::srv::ListParameters::Request::DEPTH_RECURSIVE);
 
   for (std::string& name : all_params.names) {
-    std::vector<std::string> name_parts = splitNamespace(name, ".");
+    // Get the parameter's value
+    rclcpp::Parameter param;
+    interface->get_parameter(name, param);
+
+    std::replace(name.begin(), name.end(), '.', '/');
+    std::vector<std::string> name_parts = splitNamespace(name, "/");
     std::string local_name = "";
     if (!name_parts.empty()) {
       local_name = name_parts.back();
       name_parts.pop_back();
     }
 
-    const auto sub_namespace = joinNamespace(name_parts, ".");
+    const auto sub_namespace = joinNamespace(name_parts, "/");
 
-    // Get the parameter's value
-    rclcpp::Parameter param;
-    node->get_parameter(name, param);
     // Convert data to yaml.
     YAML::Node local_node;
     if (local_name.empty()) {
@@ -130,7 +138,7 @@ inline YAML::Node rosToYaml(const rclcpp::Node::SharedPtr node,
     } else {
       local_node[local_name] = rosParamToYaml(param);
     }
-    moveDownNamespace(local_node, sub_namespace, ".");
+    moveDownNamespace(local_node, sub_namespace, "/");
     mergeYamlNodes(root, local_node);
   }
 
@@ -140,19 +148,67 @@ inline YAML::Node rosToYaml(const rclcpp::Node::SharedPtr node,
 }  // namespace internal
 
 /**
- * @brief Loads a config from a ROS2 node.
- *
+ * @brief Loads a config from a ROS2 node. This variant takes a parameter interface so 
+ * can be used in the node's constructor.
+ * 
  * @tparam ConfigT The config type. This can also be a VirtualConfig<BaseT> or a std::vector<ConfigT>.
- * @param node The ROS2 node to create the config from.
- * @param name_space Optionally specify a name space to create the config from. Separate names with dots '.'.
- * Example: "my_config.my_sub_config".
+ * @param interface Parameter interface of the ROS2 node holding the config parameters.
+ * @param name_space Optionally specify a name space to create the config from. Separate names with slashes '/'.
+ * Example: "my_config/my_sub_config".
  * @returns The config.
  */
 template <typename ConfigT>
-ConfigT fromRos(const rclcpp::Node::SharedPtr node, const std::string& name_space = "") {
-  const YAML::Node yaml_node = internal::rosToYaml(node, name_space, map_prefixes);
-    
+ConfigT fromRos(rclcpp::node_interfaces::NodeParametersInterface::SharedPtr interface, 
+        const std::string& name_space = "") {
+  const YAML::Node yaml_node = internal::rosToYaml(interface, name_space);
+
   return fromYaml<ConfigT>(yaml_node, name_space);
+}
+
+/**
+ * @brief Loads a config from a ROS2 node.
+ *
+ * @tparam ConfigT The config type. This can also be a VirtualConfig<BaseT> or a std::vector<ConfigT>.
+ * @param node The ROS2 node holding the config parameters.
+ * @param name_space Optionally specify a name space to create the config from. Separate names with slashes '.'.
+ * Example: "my_config/my_sub_config".
+ * @returns The config.
+ */
+template <typename ConfigT>
+ConfigT fromRos(rclcpp::Node::SharedPtr node, const std::string& name_space = "") {    
+  return fromRos<ConfigT>(node->get_node_parameters_interface(), name_space);
+}
+
+/**
+ * @brief Update the config with the current parameters in ROS2.
+ * @note This function will update the field and check the validity of the config afterwards. 
+ * If the config is invalid, the field will be reset to its original value.
+ * @param config The config to update.
+ * @param interface Parameter interface of the ROS2 node holding the config parameters.
+ * @param name_space Optionally specify a name space to create the config from. 
+ * Separate names with slashes '/'.
+ */
+template <typename ConfigT>
+bool updateFromRos(ConfigT& config, 
+        const rclcpp::node_interfaces::NodeParametersInterface::SharedPtr interface, 
+        const std::string& name_space = "") {
+  const YAML::Node node = internal::rosToYaml(interface, name_space);
+  return updateFields<ConfigT>(config, node, true, name_space);
+}
+
+/**
+ * @brief Update the config with the current parameters in ROS2.
+ * @note This function will update the field and check the validity of the config afterwards. 
+ * If the config is invalid, the field will be reset to its original value.
+ * @param config The config to update.
+ * @param node The ROS2 node holding the config parameters.
+ * @param name_space Optionally specify a name space to create the config from. 
+ * Separate names with slashes '/'.
+ */
+template <typename ConfigT>
+bool updateFromRos(ConfigT& config, const rclcpp::Node::SharedPtr node, 
+        const std::string& name_space = "") {
+  return updateFromRos<ConfigT>(config, node->get_node_parameters_interface(), name_space);
 }
 
 }  // namespace config
